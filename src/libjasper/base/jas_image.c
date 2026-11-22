@@ -1580,15 +1580,52 @@ static int putint(jas_stream_t *out, bool sgnd, unsigned prec, long val)
 static long convert(long val, bool oldsgnd, unsigned oldprec, bool newsgnd,
   unsigned newprec)
 {
-	/* TODO: The following code looks suspicious (i.e., an empty if body). */
+	/*
+	 * If the signedness of the sample value is being changed, adjust
+	 * the sample value by the appropriate bias in order to convert
+	 * between the signed and unsigned representations (i.e., convert
+	 * to/from the offset-binary representation).
+	 */
 	if (newsgnd != oldsgnd) {
+		if (oldsgnd) {
+			/* Convert from signed to unsigned by adding a bias. */
+			val += 1L << (oldprec - 1);
+		} else {
+			/* Convert from unsigned to signed by subtracting a bias. */
+			val -= 1L << (oldprec - 1);
+		}
 	}
 	if (newprec != oldprec) {
 		if (newprec > oldprec) {
+			/*
+			 * Increase the precision by shifting left, introducing
+			 * zero bits as the new least-significant bits.
+			 */
 			val <<= newprec - oldprec;
-		} else if (oldprec > newprec) {
+		} else {
+			/*
+			 * Decrease the precision by shifting right, rounding
+			 * to nearest (with ties rounding away from zero for
+			 * nonnegative values) by adding half of the value of
+			 * the least-significant bit retained prior to shifting.
+			 */
+			val += 1L << (oldprec - newprec - 1);
 			val >>= oldprec - newprec;
 		}
+	}
+	/*
+	 * Saturate the sample value to ensure that it is representable
+	 * with the precision and signedness of the target component.
+	 * (In particular, a negative value must never be allowed to
+	 * wrap around to a large unsigned value.)
+	 */
+	const long minval = newsgnd ? -(1L << (newprec - 1)) : 0;
+	const long maxval =
+	  newsgnd ? (1L << (newprec - 1)) - 1 : (1L << newprec) - 1;
+	if (val < minval) {
+		val = minval;
+	} else if (val > maxval) {
+		val = maxval;
 	}
 	return val;
 }
@@ -1784,7 +1821,9 @@ jas_image_t *jas_image_chclrspc(jas_image_t *image,
 				goto error;
 			}
 		}
-		jas_cmxform_apply(xform, &inpixmap, &outpixmap);
+		if (jas_cmxform_apply(xform, &inpixmap, &outpixmap)) {
+			goto error;
+		}
 		for (unsigned j = 0; j < numoutclrchans; ++j) {
 			k = jas_image_getcmptbytype(outimage, JAS_IMAGE_CT_COLOR(j));
 			if (jas_image_writecmpt2(outimage, k, 0, i, width, 1,

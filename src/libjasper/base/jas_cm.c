@@ -608,14 +608,20 @@ int jas_cmxform_apply(const jas_cmxform_t *xform, const jas_cmpixmap_t *in, jas_
 		for (unsigned i = 0; i < xform->numinchans; ++i) {
 			fmt = &in->cmptfmts[i];
 			scale = (double)((1 << fmt->prec) - 1);
-			const unsigned bias = fmt->sgnd ? (1 << (fmt->prec - 1)) : 0;
+			const long bias = fmt->sgnd ? (1L << (fmt->prec - 1)) : 0;
 			const long *dataptr = &fmt->buf[n];
 			jas_cmreal_t *bufptr = &inbuf[i];
 			for (unsigned j = 0; j < m; ++j) {
 				if (jas_cmgetint(&dataptr, fmt->sgnd, fmt->prec, &v)) {
 					goto error;
 				}
-				*bufptr = (jas_cmreal_t)(v - bias) / scale;
+				/*
+				 * Convert the sample value to a real number in [0, 1].
+				 * A signed sample value must first be converted to its
+				 * offset-binary (i.e., unsigned) representation by
+				 * adding the bias 2^(prec - 1).
+				 */
+				*bufptr = (jas_cmreal_t)(v + bias) / scale;
 				bufptr += xform->numinchans;
 			}
 		}
@@ -638,11 +644,28 @@ int jas_cmxform_apply(const jas_cmxform_t *xform, const jas_cmpixmap_t *in, jas_
 		for (unsigned i = 0; i < xform->numoutchans; ++i) {
 			fmt = &out->cmptfmts[i];
 			scale = (double)((1 << fmt->prec) - 1);
-			const unsigned bias = fmt->sgnd ? (1 << (fmt->prec - 1)) : 0;
+			const long bias = fmt->sgnd ? (1L << (fmt->prec - 1)) : 0;
+			const long minval = fmt->sgnd ? -bias : 0;
+			const long maxval = fmt->sgnd ? bias - 1 : (1 << fmt->prec) - 1;
 			const jas_cmreal_t *bufptr = &outbuf[i];
 			long *dataptr = &fmt->buf[n];
 			for (unsigned j = 0; j < m; ++j) {
-				v = (long)((*bufptr) * scale + bias);
+				/*
+				 * Convert the real number in [0, 1] to a sample value.
+				 * For a signed component, the offset-binary
+				 * representation is converted to a signed one by
+				 * subtracting the bias 2^(prec - 1).  The result is
+				 * saturated to the range representable with the
+				 * precision and signedness of the component, so that
+				 * an out-of-range value (e.g., a negative one) can
+				 * never wrap around to a large unsigned value.
+				 */
+				v = (long)((*bufptr) * scale) - bias;
+				if (v < minval) {
+					v = minval;
+				} else if (v > maxval) {
+					v = maxval;
+				}
 				bufptr += xform->numoutchans;
 				if (jas_cmputint(&dataptr, fmt->sgnd, fmt->prec, v)) {
 					goto error;
@@ -942,7 +965,6 @@ static int jas_cmshapmat_apply(const jas_cmpxform_t *pxform, const jas_cmreal_t 
 				*dst++ = a2;
 			}
 		} else {
-assert(0);
 			while (cnt-- > 0) {
 				a0 = *src++;
 				src++;
@@ -1197,13 +1219,12 @@ static int mono(const jas_iccprof_t *iccprof, int op, jas_cmpxformseq_t **retpxf
 		goto error;
 	}
 
-	pxform->numinchans = 1;
-	pxform->numoutchans = 3;
-
 	shapmat->mono = 1;
 	shapmat->useluts = 1;
 	shapmat->usemat = 1;
 	if (!op) {
+		pxform->numinchans = 1;
+		pxform->numoutchans = 3;
 		shapmat->order = 0;
 		shapmat->mat[0][0] = 0.9642;
 		shapmat->mat[1][0] = 1.0;
@@ -1212,6 +1233,8 @@ static int mono(const jas_iccprof_t *iccprof, int op, jas_cmpxformseq_t **retpxf
 			goto error;
 		}
 	} else {
+		pxform->numinchans = 3;
+		pxform->numoutchans = 1;
 		shapmat->order = 1;
 		shapmat->mat[0][0] = 1.0 / 0.9642;
 		shapmat->mat[1][0] = 1.0;
